@@ -1,6 +1,10 @@
 # Ucore学习笔记
 
-## make的执行过程
+## lab1
+
+### make的执行过程
+
+以下代码摘自make命令的输出。
 
 ```shell
 + cc kern/init/init.c
@@ -91,6 +95,11 @@ dd if=/dev/zero of=bin/ucore.img count=10000
 #count=10000表示读取10000*512字节的数据
 #即ucore.img大小为5,120,000字节。
 
+#拓展
+#/dev/null “空设备”，任何输入到这个设备的数据都被丢弃。
+#/dev/random 随机数设备，依赖系统中断不断产生随机字节流。产生速度较慢，但随机性好。
+#/dev/urandom 不依赖系统中断，速度快，随机性较低。
+
 #conv = notrunc 表示如果目的文件已经存在，那么不要截断文件内容。默认会截断成0字节大小。一般配合oflag = append使用，不截断并且以追加的方式写入数据。
 dd if=bin/bootblock of=bin/ucore.img conv=notrunc
 1+0 records in
@@ -107,4 +116,48 @@ dd if=bin/kernel of=bin/ucore.img seek=1 conv=notrunc
 #将kernel复制到ucore.img中。
 
 ```
+
+
+
+### i8086的启动过程
+
+i8086有20根地址总线，实模式下内存空间布局如下：
+
+| 起始    | 结束    | 大小           | 用途                                                         |
+| ------- | ------- | -------------- | ------------------------------------------------------------ |
+| 0xFFFF0 | 0xFFFFF | 16B            | BIOS入口地址，此地址也属于BIOS代码，同样属于顶部64KB。这里的16字节的内容是长跳转指令jmp F000:E05B |
+| 0xF0000 | 0xFFFEF | 64KB-16B       | BIOS范围是F0000～FFFFF共64KB，最上面的16字节是BIOS入口地址。 |
+| 0xC8000 | 0xEFFFF | 160KB          | 映射硬件适配器的ROM或者内存映射式I/O。                       |
+| 0xC0000 | 0xC7FFF | 32KB           | 显示适配器BIOS。                                             |
+| 0xB8000 | 0xBFFFF | 32KB           | 用于文本模式显示适配器。                                     |
+| 0xB0000 | 0xB7FFF | 32KB           | 用于黑白显示适配器。                                         |
+| 0xA0000 | 0xAFFFF | 64KB           | 用于彩色显示适配器。                                         |
+| 0x9FC00 | 0x9FFFF | 1KB            | EBDA(Extended BIOS Data Area)扩展BIOS数据区。                |
+| 0x07E00 | 0x9FBFF | 622080B约608KB | 可用区域。                                                   |
+| 0x07C00 | 0x07DFF | 512B           | MBR被BIOS加载到此处，共512字节。                             |
+| 0x00500 | 0x07BFF | 30464B约30KB   | 可用区域。                                                   |
+| 0x00400 | 0x004FF | 256B           | BIOS Data Area(BIOS数据区)。                                 |
+| 0x00000 | 0x003FF | 1KB            | Interrupt Vector Table(中断向量表)。                         |
+
+- 从低地址向高地址看，0到0x9FFFF为DRAM，有640KB。
+
+- 顶部的0xF0000到0xFFFFF为ROM，有64KB，储存BIOS代码。
+
+- PC加电后，CS寄存器初始化为**0xF000**，IP寄存器初始化为**0xFFF0**，于是CPU执行的第一条指令的地址是**CS:IP = 0xFFFF0**，是一条跳转指令**jmp F000:E05B**。开始BIOS执行过程。
+
+- BIOS主要做两件事：初始化硬件和建立中断向量表。建立中断向量表，其他程序就能通过中断调用BIOS已经实现的硬件控制函数。
+
+- BIOS的最后一项工作是校验0盘0道1扇区的内容，如果BIOS发现这个扇区最后两个字节是0x55AA，那么BIOS就会将这个扇区的内容加载到内存0x7C00处，用的是命令**jmp 0:7C00**。之后的工作便交给BOOTLoader(MBR)。
+
+> 拓展
+>
+> 到了32位的80386 CPU时代，内存空间扩大到了4G，多了段机制和页机制，但Intel依然很好地保证了80386向后兼容8086。
+>
+> 地址空间的变化导致无法直接采用8086的启动约定。如果把BIOS启动固件编址在0xF000起始的64KB内存地址空间内，就会把整个物理内存地址空间隔离成不连续的两段，一段是0xF000以前的地址，一段是1MB以后的地址，这很不协调。
+>
+> 为此，intel采用了一个折中的方案：默认将执行BIOS ROM编址在32位内存地址空间的最高端，即位于4GB地址的最后一个64KB内。在PC系统开机复位时，CPU进入实模式，并将CS寄存器设置成0xF000，将它的shadow register的Base值初始化设置为0xFFFF0000，EIP寄存器初始化设置为0x0000FFF0。所以机器执行的第一条指令的物理地址是0xFFFFFFF0。
+>
+> 80386的BIOS代码也要和以前8086的BIOS代码兼容，故地址0xFFFFFFF0处的指令还是一条长跳转指令`jmp F000:E05B`。注意，这个长跳转指令会触发更新CS寄存器和它的shadow register，即执行`jmp F000 : E05B`后，CS将被更新成0xF000。表面上看CS其实没有变化，但CS的shadow register被更新为另外一个值了，它的Base域被更新成0x000F0000，此时形成的物理地址为Base+EIP=0x000FE05B，这就是CPU执行的第二条指令的地址。
+>
+> 此时这条指令的地址已经是1M以内了，且此地址不再位于BIOS ROM中，而是位于RAM空间中。由于Intel设计了一种映射机制，将内存高端的BIOS ROM映射到1MB以内的RAM空间里，并且可以使这一段被映射的RAM空间具有与ROM类似的只读属性。所以PC机启动时将开启这种映射机制，让4GB地址空间的最高一个64KB的内容等同于1MB地址空间的最高一个64K的内容，从而使得执行了长跳转指令后，其实是回到了早期的8086 CPU初始化控制流，保证了向下兼容。
 
