@@ -73,7 +73,7 @@ gcc -g -Wall -O2 obj/sign/tools/sign.o -o bin/sign
 
 + ld bin/bootblock
 ld -m    elf_i386 -nostdlib -N -e start -Ttext 0x7C00 obj/boot/bootasm.o obj/boot/bootmain.o -o obj/bootblock.o
-#链接生成可执行文件bin/bootblock
+#链接生成二进制文件bin/bootblock
 
 'obj/bootblock.out' size: 492 bytes
 build 512 bytes boot sector: 'bin/bootblock' success!
@@ -160,4 +160,31 @@ i8086有20根地址总线，实模式下内存空间布局如下：
 > 80386的BIOS代码也要和以前8086的BIOS代码兼容，故地址0xFFFFFFF0处的指令还是一条长跳转指令`jmp F000:E05B`。注意，这个长跳转指令会触发更新CS寄存器和它的shadow register，即执行`jmp F000 : E05B`后，CS将被更新成0xF000。表面上看CS其实没有变化，但CS的shadow register被更新为另外一个值了，它的Base域被更新成0x000F0000，此时形成的物理地址为Base+EIP=0x000FE05B，这就是CPU执行的第二条指令的地址。
 >
 > 此时这条指令的地址已经是1M以内了，且此地址不再位于BIOS ROM中，而是位于RAM空间中。由于Intel设计了一种映射机制，将内存高端的BIOS ROM映射到1MB以内的RAM空间里，并且可以使这一段被映射的RAM空间具有与ROM类似的只读属性。所以PC机启动时将开启这种映射机制，让4GB地址空间的最高一个64KB的内容等同于1MB地址空间的最高一个64K的内容，从而使得执行了长跳转指令后，其实是回到了早期的8086 CPU初始化控制流，保证了向下兼容。
+
+
+
+### BootLoader执行过程
+
+BIOS将通过读取硬盘主引导扇区到内存，并转跳到对应内存中的位置执行bootloader。bootloader完成的工作包括：
+
+- 切换到保护模式，启用分段机制
+- 读磁盘中ELF执行文件格式的ucore操作系统到内存
+- 显示字符串信息
+- 把控制权交给ucore操作系统
+
+对应其工作的实现文件在lab1中的boot目录下的三个文件asm.h、bootasm.S和bootmain.c。
+
+
+
+### BootLoader进入保护模式的过程
+
+#### 全局描述符表
+
+和一个段有关的信息需要8个字节（64）位来描述，所以称为段描述符（Segemnt Descriptor）。每个段需要一个描述符，为了存放这些描述符，需要在内存中开辟一段空间。这段空间里，所有的描述符都是挨在一起，集中存放的，这就构成一个段描述符。
+
+主要的段描述符表是**全局描述符表**（Global Descriptor Table, GDT）。所谓全局，意味着是为整个软硬件系统服务的。在进入保护模式前，必须定义全局描述符表。
+
+处理器内部有一个48位的寄存器，称为**全局描述符表寄存器**（GDTR），用于跟踪全局描述符表。寄存器分为32位的线性地址和16位的边界。32位的线性基地址保存的是全局描述符表在内存中的起始地址，16位边界部分保存的是全局描述符表的边界（界限），在数值上等于表的大小减一。
+
+由于GDT的界限是16位的，所以该表最大2^16^字节，也就是65536字节（64KB）。而一个段描述符大小8字节，故最多可以定义2^13^也就是8192个段描述符。
 
