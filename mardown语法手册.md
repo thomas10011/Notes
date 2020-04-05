@@ -519,6 +519,17 @@ $$ \sideset{^1_2}{^3_4}\bigotimes $$
 
 
 
+### 输入带字符的箭头
+
+代码：
+
+```
+$\stackrel{a}{\longrightarrow}$
+```
+
+例子：
+
+$\stackrel{a}{\longrightarrow}$
 
 
 
