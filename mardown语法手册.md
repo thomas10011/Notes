@@ -525,11 +525,14 @@ $$ \sideset{^1_2}{^3_4}\bigotimes $$
 
 ```
 $\stackrel{a}{\longrightarrow}$
+$\xrightarrow[a]{b}$
 ```
 
 例子：
 
 $\stackrel{a}{\longrightarrow}$
+
+$\xrightarrow[a]{b}$
 
 
 
