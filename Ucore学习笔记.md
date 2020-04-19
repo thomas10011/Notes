@@ -1004,8 +1004,6 @@ waitdisk(void) {
 
 
 
-
-
 ###### insl函数
 
 在x86.h文件中找到函数``insl(uint32_t port, void *addr, int cnt)``的定义：
@@ -1057,3 +1055,162 @@ f2对应的应该是``repne``指令，关于指令对应的机器码可以看这
 简单地说，就是将``ecx``个双字（在这里因为后缀是l表示双字，也可以是字，字节）从端口``edx``输入到内存``es:edi``处。
 
 所以，当传入的``cnt``是``SECSIZE/4``时，读取的字节数就是整个扇区大小的字节数。
+
+
+
+
+
+### 练习5：实现函数调用堆栈跟踪函数 （需要编程）
+
+> 我们需要在lab1中完成kdebug.c中函数print_stackframe的实现，可以通过函数print_stackframe来跟踪函数调用堆栈中记录的返回地址。在如果能够正确实现此函数，可在lab1中执行 “make qemu”后，在qemu模拟器中得到类似如下的输出：
+>
+> ```assembly
+> ……
+> ebp:0x00007b28 eip:0x00100992 args:0x00010094 0x00010094 0x00007b58 0x00100096
+>     kern/debug/kdebug.c:305: print_stackframe+22
+> ebp:0x00007b38 eip:0x00100c79 args:0x00000000 0x00000000 0x00000000 0x00007ba8
+>     kern/debug/kmonitor.c:125: mon_backtrace+10
+> ebp:0x00007b58 eip:0x00100096 args:0x00000000 0x00007b80 0xffff0000 0x00007b84
+>     kern/init/init.c:48: grade_backtrace2+33
+> ebp:0x00007b78 eip:0x001000bf args:0x00000000 0xffff0000 0x00007ba4 0x00000029
+>     kern/init/init.c:53: grade_backtrace1+38
+> ebp:0x00007b98 eip:0x001000dd args:0x00000000 0x00100000 0xffff0000 0x0000001d
+>     kern/init/init.c:58: grade_backtrace0+23
+> ebp:0x00007bb8 eip:0x00100102 args:0x0010353c 0x00103520 0x00001308 0x00000000
+>     kern/init/init.c:63: grade_backtrace+34
+> ebp:0x00007be8 eip:0x00100059 args:0x00000000 0x00000000 0x00000000 0x00007c53
+>     kern/init/init.c:28: kern_init+88
+> ebp:0x00007bf8 eip:0x00007d73 args:0xc031fcfa 0xc08ed88e 0x64e4d08e 0xfa7502a8
+> <unknow>: -- 0x00007d72 –
+> ……
+> ```
+>
+> 请完成实验，看看输出是否与上述显示大致一致，并解释最后一行各个数值的含义。
+
+
+
+##### 预备知识
+
+一个函数调用动作可分解为：零到多个PUSH指令（用于参数入栈），一个CALL指令。
+
+CALL指令内部其实还暗含了**一个将返回地址（即CALL指令下一条指令的地址）压栈的动作**（由硬件完成）。几乎所有本地编译器都会在每个函数体之前插入类似如下的汇编指令：
+
+```assembly
+pushl   %ebp
+movl   %esp , %ebp
+```
+
+这样在程序执行到一个函数的实际指令前，已经有以下数据顺序入栈：参数、返回地址、ebp寄存器。由此得到类似如下的栈结构（参数入栈顺序跟调用方式有关，这里以C语言默认的CDECL为例）：
+
+```
++|  栈底方向        | 高位地址
+ |    ...        |
+ |    ...        |
+ |  参数3        |
+ |  参数2        |
+ |  参数1        |
+ |  返回地址        |
+ |  上一层[ebp]    | <-------- [ebp]
+ |  局部变量        |  低位地址
+```
+
+分析函数调用栈结构
+
+
+
+##### 代码实现及输出结果分析
+
+以下是我实现的代码：
+
+```c
+ 	//读取ebp eip的值
+    uint32_t ebp = read_ebp();
+    uint32_t eip = read_eip();
+    
+    //两个临时变量i，j
+    uint32_t i, j, k, count;
+    //让i等于当前ebp寄存器的内容，也就是上一层ebp值的地址。
+    //让j等于当前eip寄存器的内容，也就是当前的函数返回地址。
+	//count表示当前循环的深度。
+
+    //当i!=0也就是ebp不等于0,并且count小于栈的深度时循环。
+    //每次让i的值变为上一层ebp的值。
+    for(i=ebp, j=eip, count=0;
+        i!=0 && count<STACKFRAME_DEPTH;
+        i=*(uint32_t *)i, j=*(uint32_t *)(i+4), count++){
+        //输出当前ebp，eip的值
+        cprintf("ebp: 0x%08x eip: 0x%08x ", i, j);
+
+        cprintf("arg: ");
+        //打印四个参数，分别是i+8，i+12，i+16，i+20
+        for(k=0; k<4; k++){
+            cprintf("%08x ",*(uint32_t *)(i+8+k*4));
+        }
+        cprintf("\n");
+        //打印当前eip-1
+        print_debuginfo(j-1);
+        
+    }
+```
+
+输出结果：
+
+```assembly
+Kernel executable memory footprint: 64KB
+ebp: 0x00007b28 eip: 0x00100a63 arg: 00010094 00010094 00007b58 00100092 
+    kern/debug/kdebug.c:308: print_stackframe+21
+ebp: 0x00007b38 eip: 0x00100092 arg: 00000000 00000000 00000000 00007ba8 
+    kern/init/init.c:48: grade_backtrace2+33
+ebp: 0x00007b58 eip: 0x001000bc arg: 00000000 00007b80 ffff0000 00007b84 
+    kern/init/init.c:53: grade_backtrace1+38
+ebp: 0x00007b78 eip: 0x001000db arg: 00000000 ffff0000 00007ba4 00000029 
+    kern/init/init.c:58: grade_backtrace0+23
+ebp: 0x00007b98 eip: 0x00100101 arg: 00000000 00100000 ffff0000 0000001d 
+    kern/init/init.c:63: grade_backtrace+34
+ebp: 0x00007bb8 eip: 0x00100055 arg: 001032dc 001032c0 0000130a 00000000 
+    kern/init/init.c:28: kern_init+84
+ebp: 0x00007be8 eip: 0x00007d72 arg: 00000000 00000000 00000000 00007c4f 
+    <unknow>: -- 0x00007d71 --
+ebp: 0x00007bf8 eip: 0x00007c4f arg: c031fcfa c08ed88e 64e4d08e fa7502a8 
+    <unknow>: -- 0x00007c4e --
+```
+
+可以看到，最后一行，ebp:0x00007bf8，表示第一个函数调用的ebp值位于内存的0x00007bf8。
+
+而这第一个函数调用的返回值是eip:0x00007c4f，表示第一个函数的返回地址是0x00007c4f。到bootblock.asm中，找到了返回地址处的指令：
+
+```assembly
+00007c4f <spin>:
+
+    # If bootmain returns (it shouldn't), loop.
+spin:
+    jmp spin
+    7c4f:	eb fe                	jmp    7c4f <spin>
+    7c51:	8d 76 00             	lea    0x0(%esi),%esi
+```
+
+也就是spin死循环。结合我们前面对boot.asm文件的分析，也就是说，如果bootmian函数返回了（正常情况下是不应该返回的），此时栈底的函数返回地址就是之前的spin死循环。
+
+同样可以分析倒数第二行，
+
+```assembly
+ebp: 0x00007be8 eip: 0x00007d72 arg: 00000000 00000000 00000000 00007c4f 
+    <unknow>: -- 0x00007d71 --
+```
+
+在bootmain.c中找到了这里的返回地址对应的代码：
+
+```assembly
+bad:
+    outw (0x8A00, 0x8A00);
+    outw (0x8A00, 0x8E00);
+```
+
+结合我们之前对bootmain函数的分析，当读取扇区出错时，函数的返回地址就是这里。
+
+
+
+
+
+
+
