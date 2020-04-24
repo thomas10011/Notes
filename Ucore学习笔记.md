@@ -786,7 +786,7 @@ bootmain执行的第一行代码在89行：
 
 对于``readseg``函数执行的详细过程，请看后面对``readseg``函数执行过程的详细分析。
 
-这里直接说一下结果，这个函数执行完毕以后，``bootmain``就将``kernel``从磁盘上（在ucore实验中也就是ucore.img文件的从第二个扇区开始的一页）读到了内存的0x10000处。
+这里直接说一下结果，这个函数执行完毕以后，``bootmain``就将``kernel``的**第一页**从磁盘上（在ucore实验中也就是ucore.img文件的从第二个扇区开始的一页）读到了内存的0x10000处。
 
 
 
@@ -798,7 +798,7 @@ if (ELFHDR->e_magic != ELF_MAGIC) {
     }
 ```
 
-当kernel（对应的是kernel.elf，内核的可执行文件）加载到内存的0x10000处以后，此时ELFHDR宏对应的结构体指针就指向了kernel的ELF Header了。
+当kernel（对应的是kernel.elf，内核的可执行文件）的第一页加载到内存的0x10000处以后，此时ELFHDR宏对应的结构体指针就指向了kernel的ELF Header了。
 
 然后就是检查是否是合法的elf文件。若不是，就跳转到bad标号处。
 
@@ -818,7 +818,7 @@ bad:
 
 
 
-当kernel正常加载以后，接下来开始加载程序段。
+当kernel的头部正常加载以后，接下来开始加载程序段。
 
 ```c
 	struct proghdr *ph, *eph;
@@ -831,23 +831,38 @@ bad:
     }
 ```
 
-将``*ph``指针的值设置为``ELFHDR``中``Program Headr``的地址。
+首先将``*ph``指针的值设置为``ELFHDR``中``Program Headr``表中的地址。
 
-然后开始从磁盘中读取程序到``kernel``中。
+其中`ELFHDR->e_phoff`是program header表相对于ELFHDR的偏移量。
 
-**最后，调用``kernel``的入口点函数，也就是init.c文件中的``kern_init``函数。至此，BootLoader就把ELF格式的OS加载到内存中了。**
+`eph`指向的是program header表的最后一项的地址。
+
+接下来一个循环就是每次从program header表中，根据当前的program header读取对应的程序段到内存中。
+
+**最后，调用``kernel``的入口点函数，在这里，`ELFHDR->entry`的值是0x100000，也就是init.c文件中的``kern_init``函数在内存中的位置。至此，BootLoader就把ELF格式的OS加载到内存中了。**
 
 ```c
 ((void (*)(void))(ELFHDR->e_entry & 0xFFFFFF))();
 ```
 
+值得注意的是，通过gdb单步调试分析`0x10000`处的elfhdr，可以得到如下信息：
 
+```assembly
+(gdb) x/1aw 0x10000
+0x10000:        0x464c457f
+(gdb) x/12ab 0x10004
+0x10004:        0x1     0x1     0x1     0x0     0x0     0x0     0x0     0x0
+0x1000c:        0x0     0x0     0x0     0x0
+(gdb) x/2ah 0x10010
+0x10010:        0x2     0x3
+(gdb) x/2aw 0x10014
+0x10014:        0x1     0x100000 <kern_init>
+```
 
+对比一下下面提到的elfhdr结构体，可以得出一些有用的信息：
 
-
-
-
-
+- 机器类型是x86
+- 内核的入口点函数是在**0x100000**处。
 
 
 
@@ -1210,7 +1225,7 @@ bad:
 
 
 
-### 练习6
+### 练习6 完善中断初始化和处理 （需要编程
 
 #### 预备知识
 
@@ -1358,9 +1373,15 @@ Intel处理器有四个特权级，级别由高到低分别是00、01、10、11�
 
 - RPL$=$选择子对应的段描述符的DPL
 
-因此，当用call far进行控制转移时，还要切换栈，也就是从低特权级的栈切换到高特权级的栈。所以，对于特权级为3的任务来说，最多还要额外定义特权级为0、1、2的三个栈，以便在特权级发生转换时使用。
+因此，当用call far进行控制转移时，还要**切换栈**，也就是从低特权级的栈切换到高特权级的栈。这个过程就是通过TR寄存器找到当前任务的TSS，然后从中取得特权级高的栈的地址信息，然后进行栈切换。所以，对于特权级为3的任务来说，最多还要额外定义特权级为0、1、2的三个栈，以便在特权级发生转换时使用。
+
+栈切换前，段寄存器SS指向的是旧栈，ESP指向旧栈的栈顶，也就是最后一个被压入的要传送给服务例程的参数。栈切换后，处理器自动替换SS和ESP中的内容。
+
+但是我们并不需要程序员来关心栈的切换和参数的复制，因为操作系统在栈切换之前会执行`pop edx`指令，也就是把要传递的最后一个参数出栈到edx寄存器中。
 
 这些额外创建的栈，他们的描述符位于任务自己的LDT中。同时，还要在任务的TSS中进行登记。回看一下上面的TSS的示意图，偏移4～24处用于登记对应特权级的栈段选择子以及相应的ESP的初始值。任务自己的栈信息位于偏移量56（ESP）和80（SS）处。
+
+如果中断是被用户态程序中的指令所触发的（比如软件执行`int n`产生的中断），还会增加一个额外的检查：门的DPL必须具有与CPL相同或更低的特权。**这就防止了用户代码随意触发中断。**如果这些检查失败，会产生一个一般保护异常（general-protection exception）。
 
 
 
@@ -1400,10 +1421,6 @@ EFLAGS寄存器里有一个NT位（位14)，意思是嵌套任务标志（Nested
 
 - 软中断是由`int n`指令引发的中断处理，n叫做中断号或者类型码。
 
-
-
-###### 中断描述符表
-
 异常分为三种：
 
 - 程序错误异常。
@@ -1417,6 +1434,8 @@ EFLAGS寄存器里有一个NT位（位14)，意思是嵌套任务标志（Nested
 - 终止（Aborts）。标志着最严重的错误，比如硬件错误、系统表（GDT、LDT等）中的数据不一致或者无效。此时，通常操作系统会终止当前任务。
 
 
+
+###### 中断描述符表
 
 在实模式下，采用的是中断向量表（IVT）的形式，位于内存地址0x00～0x3FF处，大小为1KB。
 
@@ -1463,4 +1482,240 @@ EFLAGS寄存器里有一个NT位（位14)，意思是嵌套任务标志（Nested
 
 #### 问题一
 
-中断描述符表中一个表项8个字节，除了任务门描述符外，每个表项中有16位的段选择子和32位的偏移量，根据段选择子到GDT中寻找对应的段描述符，然后用得到的段基址和32位的偏移量相加，就得到中断处理程序的代码入口。对于任务门描述符来说，16位的段选择子是TSS段选择子，处理器根据这个段选择子到GDT中选择对应的TSS描述符，TSS描述符中就描述了要切换的程序的相关状态信息，其中就包括了程序位置。
+> 中断描述符表（也可简称为保护模式下的中断向量表）中一个表项占多少字节？其中哪几位代表中断处理代码的入口？
+
+中断描述符表中一个表项8个字节，除了任务门描述符外，每个表项中有**16位的段选择子**和**32位的偏移量**，根据段选择子到GDT中寻找对应的段描述符，然后用得到的段基址和32位的偏移量相加，就得到中断处理程序的代码入口。对于任务门描述符来说，16位的段选择子是TSS段选择子，处理器根据这个段选择子到GDT中选择对应的TSS描述符，TSS描述符中就描述了要切换的程序的相关状态信息，其中就包括了程序位置。
+
+
+
+#### 问题二
+
+> 请编程完善kern/trap/trap.c中对中断向量表进行初始化的函数idt_init。在idt_init函数中，依次对所有中断入口进行初始化。使用mmu.h中的SETGATE宏，填充idt数组内容。每个中断的入口由tools/vectors.c生成，使用trap.c中声明的vectors数组即可。
+
+先要说明的是，ucore在这里实现中断的方式比较简单，并不是标准的实现中断的方式（即对应的中断号直接跳转到对应的中断服务程序）。而是由同一个函数根据中断号来处理所有的中断。
+
+vectors.S文件是由tools文件夹下的vector.c文件统一生成的。
+
+在文件vectors.S中，定义了一个`__vectors`数组，其中有256个vector向量。其中每一个vector向量都是一个中断服务例程，所做的事情就是将0压栈（表示没有错误代码），再将中断号压栈。最后，所有的vector都会**统一跳转**到标号`alltraps`处。
+
+标号`__alltraps`是ucore中对所有的中断进行统一处理的函数。首先将相关寄存器压栈，创建`trapframe`，然后调用trap.c文件中的`trap`函数处理中断。
+
+`__vectors`数组的主要作用是用来初始化中断向量表（因为中断向量表最多有256个表项），所以`__vectors`数组的向量数也是256。
+
+而`idt_init`函数就是用来初始化中断向量表的。
+
+对于这个函数，我实现的代码如下:
+
+```c
+			extern uintptr_t __vectors[];
+      int i;
+      for(i=0; i<256; i++){
+        SETGATE(idt[i], 0, 8, __vectors[i], 0);
+      }
+      lidt(&idt_pd);
+```
+
+代码第一行首先是声明引用vectors数组。下面的一个循环是用来根据每一个对每一个idt表项，用对应的vector来初始化。
+
+SETGATE这个宏可以在mmu.h文件中找到：
+
+```c
+/* *
+ * Set up a normal interrupt/trap gate descriptor
+ *   - istrap: 1 for a trap (= exception) gate, 0 for an interrupt gate
+ *   - sel: Code segment selector for interrupt/trap handler
+ *   - off: Offset in code segment for interrupt/trap handler
+ *   - dpl: Descriptor Privilege Level - the privilege level required
+ *          for software to invoke this interrupt/trap gate explicitly
+ *          using an int instruction.
+ * */
+#define SETGATE(gate, istrap, sel, off, dpl) {            \
+    (gate).gd_off_15_0 = (uint32_t)(off) & 0xffff;        \
+    (gate).gd_ss = (sel);                                \
+    (gate).gd_args = 0;                                    \
+    (gate).gd_rsv1 = 0;                                    \
+    (gate).gd_type = (istrap) ? STS_TG32 : STS_IG32;    \
+    (gate).gd_s = 0;                                    \
+    (gate).gd_dpl = (dpl);                                \
+    (gate).gd_p = 1;                                    \
+    (gate).gd_off_31_16 = (uint32_t)(off) >> 16;        \
+}
+```
+
+这个宏用来初始化一个中断描述符。五个参数的作用分别是：
+
+- `gate`表示传入的门描述符
+- `istrap`表示传入的门描述符的类型，是中断还是异常（陷阱）
+- `sel`表示中断描述符对应的中断服务程序的段选择子
+- `off`表示中断描述符对应的中断服务程序的段内偏移量
+- `dpl`表示优先级。在这里，除了调用门描述符，其他都应该是0，即最高优先级。
+
+
+
+所以，在上面的循环中，每一次传入的参数的意义是：
+
+- idt[i]表示当前要初始化的描述符
+- 0默认全部为中断
+- 8因为前面提到了，ucore的GDT只有3个段，0是空描述符，1是代码段描述符，2是数据段描述符。而中断服务程序应该位于代码段，所以这里段选择子的值应该是1000b。即在GDT中选择1号段，RPL是00。
+- __vectors[i]
+- 0表示当前服务程序的特权级是最高级别。
+
+
+
+做完了这个题目之后，我才发现在memlayout.h文件中有对整个ucore内存结构进行定义的宏。
+
+其中就有GDT中各个描述符的对应的索引号。
+
+所以上面的`sel`参数其实可以用`GD_KTEXT`这个宏进行替换。
+
+
+
+#### 问题三
+
+> 请编程完善trap.c中的中断处理函数trap，在对时钟中断进行处理的部分填写trap函数中处理时钟中断的部分，使操作系统每遇到100次时钟中断后，调用print_ticks子程序，向屏幕上打印一行文字”100 ticks”。
+
+我在上面提到了，`__alltraps`函数创建了`trapframe`以后，调用`trap`函数根据中断号处理对应的中断。
+
+先看一下`__alltraps`函数是如何创建`trapframe`的：
+
+```assembly
+# push registers to build a trap frame
+    # therefore make the stack look like a struct trapframe
+    pushl %ds
+    pushl %es
+    pushl %fs
+    pushl %gs
+    #	Push AX, CX, DX, BX, original SP, BP, SI, and DI.
+    pushal
+
+    # load GD_KDATA into %ds and %es to set up data segments for kernel
+    movl $GD_KDATA, %eax
+    movw %ax, %ds
+    movw %ax, %es
+
+    # push %esp to pass a pointer to the trapframe as an argument to trap()
+    pushl %esp
+
+    # call trap(tf), where tf=%esp
+    call trap
+
+```
+
+`trapframe`结构体在trap.h文件中的定义：
+
+```assembly
+/* registers as pushed by pushal */
+struct pushregs {
+    uint32_t reg_edi;
+    uint32_t reg_esi;
+    uint32_t reg_ebp;
+    uint32_t reg_oesp;            /* Useless */
+    uint32_t reg_ebx;
+    uint32_t reg_edx;						//顺序正好和pushal的顺序相反。
+    uint32_t reg_ecx;
+    uint32_t reg_eax;
+};
+struct trapframe {
+    struct pushregs tf_regs;
+    uint16_t tf_gs;
+    uint16_t tf_padding0;
+    uint16_t tf_fs;
+    uint16_t tf_padding1;
+    uint16_t tf_es;
+    uint16_t tf_padding2;
+    uint16_t tf_ds;
+    uint16_t tf_padding3;
+    uint32_t tf_trapno;
+    /* below here defined by x86 hardware */
+    uint32_t tf_err;
+    uintptr_t tf_eip;
+    uint16_t tf_cs;
+    uint16_t tf_padding4;
+    uint32_t tf_eflags;
+    /* below here only when crossing rings, such as from user to kernel */
+    uintptr_t tf_esp;
+    uint16_t tf_ss;
+    uint16_t tf_padding5;
+} __attribute__((packed));
+
+```
+
+
+
+从中可以分析出，依次`push ds, es, fs, gs`进入`__alltraps`之前的`push 0, trapno`的顺序都是有意义的。因为堆栈的地址是向下递减的，而`trapframe`结构体中成员变量的地址是向上递增的。所以**相反的顺序**才能构造出`trapframe`结构体。
+
+
+
+接下来分析trap函数。`trap`函数如下：
+
+```c
+void
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    trap_dispatch(tf);
+    // cprintf("in trap function\n");
+}
+```
+
+可见，调用了`trap_dispatch`函数，在这个函数中，就是根据中断号利用switch语句处理对应的中断，找到处理时钟中断的`case`，我实现的打印时钟中断的代码如下：
+
+```c
+case IRQ_OFFSET + IRQ_TIMER:
+        /* LAB1 YOUR CODE : STEP 3 */
+        /* handle the timer interrupt */
+        /* (1) After a timer interrupt, you should record this event using a global variable (increase it), such as ticks in kern/driver/clock.c
+         * (2) Every TICK_NUM cycle, you can print some info using a funciton, such as print_ticks().
+         * (3) Too Simple? Yes, I think so!
+         */
+         // cprintf("in timer interrupt function\n");
+         if(++ticks==100){
+           print_ticks();
+           ticks=0;
+         }
+        break;
+```
+
+`ticks`全局变量是定义在clock.c文件中的，每次时钟中断让`ticks+1`，每满100打印一次`100ticks`。
+
+
+
+### 拓展练习
+
+#### Challenge 1（需要编程）
+
+> 扩展proj4,增加syscall功能，即增加一用户态函数（可执行一特定系统调用：获得时钟计数值），当内核初始完毕后，可从内核态返回到用户态的函数，而用户态的函数又通过系统调用得到内核态的服务（通过网络查询所需信息，可找老师咨询。如果完成，且有兴趣做代替考试的实验，可找老师商量）。需写出详细的设计和分析报告。完成出色的可获得适当加分。
+
+关于调用门，可以看一下前面对调用门的描述（调用门对用户程序特权级有一些限制）。
+
+由于如果使用调用门实现这个函数，需要修改中断描述符表，添加一个特权级为3（用户态）的调用门描述符，还要重新在trap.c文件中添加一个用与处理这个调用门的中断服务例程，比较麻烦，所以这里直接用已经定义好的中断门（处理器这时不会检查CPL、RPL、DPL的关系）来实现。
+
+在trap.h文件中，可以看到预先为我们定义好了两个中断号：
+
+```c
+/* *
+ * These are arbitrarily chosen, but with care not to overlap
+ * processor defined exceptions or interrupt vectors.
+ * */
+#define T_SWITCH_TOU                120    // user/kernel switch
+#define T_SWITCH_TOK                121    // user/kernel switch
+```
+
+所以我们只需要在trap.c中修改对应的中断处理函数，然后在kern_init函数中发出对应的中断就行。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Challenge 2（需要编程）
+
+> 用键盘实现用户模式内核模式切换。具体目标是：“键盘输入3时切换到用户模式，键盘输入0时切换到内核模式”。 基本思路是借鉴软中断(syscall功能)的代码，并且把trap.c中软中断处理的设置语句拿过来。
